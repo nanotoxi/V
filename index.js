@@ -40,6 +40,12 @@ const sessions = new Map()
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`)
 
+  if (req.method === 'GET' && url.pathname === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' })
+    res.end('Zynq Voice Agent OK')
+    return
+  }
+
   if (req.method === 'POST' && url.pathname === '/answer') {
     // Collect POST body
     let body = ''
