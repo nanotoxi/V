@@ -91,7 +91,7 @@ const server = http.createServer(async (req, res) => {
           headers: { Authorization: 'Basic ' + Buffer.from(`${PLIVO_AUTH_ID}:${PLIVO_AUTH_TOKEN}`).toString('base64') }
         })
         const audioFile = new File([Buffer.from(await audioRes.arrayBuffer())], 'rec.mp3', { type: 'audio/mpeg' })
-        const result = await groq.audio.transcriptions.create({ file: audioFile, model: 'whisper-large-v3', language: 'en' })
+        const result = await groq.audio.transcriptions.create({ file: audioFile, model: 'whisper-large-v3-turbo', language: 'en' })
         transcript = result.text.trim() || 'no_response'
         console.log(`[transcribe] Q${questionIndex}: "${transcript}"`)
       } catch (err) {
