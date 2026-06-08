@@ -8,35 +8,28 @@ const PORT = process.env.PORT || 3001
 const GROQ_API_KEY = process.env.GROQ_API_KEY
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'JBFqnCBsd6RMkjVDRZzb'
-const MAIN_PLATFORM_URL = process.env.MAIN_PLATFORM_URL   // https://zynq-platform.up.railway.app
-const MAIN_PLATFORM_SECRET = process.env.MAIN_PLATFORM_SECRET  // same as NUXT_ADMIN_SECRET
+const MAIN_PLATFORM_URL = process.env.MAIN_PLATFORM_URL
+const MAIN_PLATFORM_SECRET = process.env.MAIN_PLATFORM_SECRET
+const PLIVO_AUTH_ID = process.env.PLIVO_AUTH_ID || 'MAMTNIM2UZZJUTYZY0ZI'
+const PLIVO_AUTH_TOKEN = process.env.PLIVO_AUTH_TOKEN || 'MDY5NGY3NTUtNTBiZC00ZDk5LTc2NzItYzczNGI5'
+const AGENT_URL = process.env.AGENT_URL || `http://localhost:${PORT}`
+
+const PLIVO_AUTH_HEADER = 'Basic ' + Buffer.from(`${PLIVO_AUTH_ID}:${PLIVO_AUTH_TOKEN}`).toString('base64')
 
 // ─── Questions ────────────────────────────────────────────────────────────────
 const QUESTIONS = [
-  {
-    field: 'noticePeriod',
-    text: 'What is your current notice period? You can just say the number of days.',
-  },
-  {
-    field: 'currentCtc',
-    text: 'What is your current C T C — your annual salary in lakhs?',
-  },
-  {
-    field: 'expectedCtc',
-    text: 'And what is your expected C T C — the salary you are targeting for your next role?',
-  },
-  {
-    field: 'activelyLooking',
-    text: 'Last question. Are you actively looking for a new job right now, or just exploring options?',
-  },
+  { field: 'noticePeriod', text: 'What is your current notice period? You can just say the number of days.' },
+  { field: 'currentCtc', text: 'What is your current C T C — your annual salary in lakhs?' },
+  { field: 'expectedCtc', text: 'And what is your expected C T C — the salary you are targeting for your next role?' },
+  { field: 'activelyLooking', text: 'Last question. Are you actively looking for a new job right now, or just exploring options?' },
 ]
 
 const ACKS = ['Got it.', 'Perfect, thank you.', 'Understood.', 'Great.']
 
-// ─── In-memory sessions (per WebSocket connection) ────────────────────────────
+// ─── In-memory sessions ───────────────────────────────────────────────────────
 const sessions = new Map()
 
-// ─── HTTP server (Plivo webhooks) ─────────────────────────────────────────────
+// ─── HTTP server ──────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`)
 
@@ -47,32 +40,41 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && url.pathname === '/answer') {
-    // Collect POST body
     let body = ''
     req.on('data', d => body += d)
-    req.on('end', () => {
-      // Params from Plivo come as query string on answer URL
+    req.on('end', async () => {
+      const plivoParams = Object.fromEntries(new URLSearchParams(body))
+      const callUuid = plivoParams.CallUUID || plivoParams.call_uuid || ''
+
       const candidateId = url.searchParams.get('candidateId') || ''
       const candidateName = decodeURIComponent(url.searchParams.get('candidateName') || 'there')
       const jobTitle = decodeURIComponent(url.searchParams.get('jobTitle') || 'this role')
       const agencyName = decodeURIComponent(url.searchParams.get('agencyName') || 'our team')
 
-      const agentBaseUrl = process.env.AGENT_URL || `http://localhost:${PORT}`
-      const wsUrl = agentBaseUrl.replace('https://', 'wss://').replace('http://', 'ws://') + '/stream'
+      console.log(`[HTTP] /answer — callUuid:${callUuid} candidate:${candidateName}`)
 
-      const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Stream wsUrl="${wsUrl}" bidirectional="true">
-    <Parameter name="candidateId" value="${candidateId}" />
-    <Parameter name="candidateName" value="${encodeURIComponent(candidateName)}" />
-    <Parameter name="jobTitle" value="${encodeURIComponent(jobTitle)}" />
-    <Parameter name="agencyName" value="${encodeURIComponent(agencyName)}" />
-  </Stream>
-</Response>`
-
+      // Keep call alive while WebSocket stream handles the conversation
       res.writeHead(200, { 'Content-Type': 'application/xml' })
-      res.end(xml)
-      console.log(`[HTTP] /answer → streaming call for candidate ${candidateId}`)
+      res.end(`<?xml version="1.0" encoding="UTF-8"?><Response><Wait length="600" /></Response>`)
+
+      // Start bidirectional stream via Plivo REST API
+      const wsUrl = AGENT_URL.replace('https://', 'wss://').replace('http://', 'ws://') + '/stream'
+      try {
+        const streamRes = await fetch(`https://api.plivo.com/v1/Account/${PLIVO_AUTH_ID}/Call/${callUuid}/Stream/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': PLIVO_AUTH_HEADER },
+          body: JSON.stringify({
+            serviceUrl: wsUrl,
+            bidirectional: true,
+            audioTrack: 'inbound',
+            customParameters: { candidateId, candidateName, jobTitle, agencyName },
+          }),
+        })
+        const streamData = await streamRes.json()
+        console.log(`[HTTP] Stream started:`, streamData)
+      } catch (err) {
+        console.error('[HTTP] Stream start error:', err.message)
+      }
     })
     return
   }
@@ -108,8 +110,10 @@ wss.on('connection', (ws) => {
 
     if (data.event === 'start') {
       const params = data.start?.customParameters || {}
+      const callUuid = data.start?.callId || data.start?.callUuid || data.start?.callSid || ''
       const session = {
         peerId,
+        callUuid,
         candidateId: params.candidateId || '',
         candidateName: decodeURIComponent(params.candidateName || 'there'),
         firstName: decodeURIComponent(params.candidateName || 'there').split(' ')[0],
@@ -122,6 +126,7 @@ wss.on('connection', (ws) => {
         answers: {},
       }
       sessions.set(peerId, session)
+      console.log(`[WS] Session started for ${session.candidateName}, callUuid:${callUuid}`)
 
       const greeting = `Hi ${session.firstName}! This is a quick screening call from ${session.agencyName} regarding your application for the ${session.jobTitle} position. I just have 4 short questions — it will take under 2 minutes.`
       await speakAndListen(ws, session, greeting, 0)
@@ -130,27 +135,16 @@ wss.on('connection', (ws) => {
     if (data.event === 'media') {
       const session = sessions.get(peerId)
       if (!session || session.isPlaying) return
-
       session.audioChunks.push(Buffer.from(data.media.payload, 'base64'))
-
       if (session.silenceTimer) clearTimeout(session.silenceTimer)
       session.silenceTimer = setTimeout(() => onSilence(ws, session), 1500)
     }
 
-    if (data.event === 'stop') {
-      cleanup(peerId)
-    }
+    if (data.event === 'stop') cleanup(peerId)
   })
 
-  ws.on('close', () => {
-    console.log(`[WS] Disconnected: ${peerId}`)
-    cleanup(peerId)
-  })
-
-  ws.on('error', (err) => {
-    console.error(`[WS] Error ${peerId}:`, err.message)
-    cleanup(peerId)
-  })
+  ws.on('close', () => { console.log(`[WS] Disconnected: ${peerId}`); cleanup(peerId) })
+  ws.on('error', (err) => { console.error(`[WS] Error ${peerId}:`, err.message); cleanup(peerId) })
 })
 
 function cleanup(peerId) {
@@ -162,7 +156,6 @@ function cleanup(peerId) {
 // ─── Silence → transcribe → respond ──────────────────────────────────────────
 async function onSilence(ws, session) {
   if (session.audioChunks.length < 8) {
-    // Too little audio — background noise, keep listening
     session.audioChunks = []
     return
   }
@@ -171,17 +164,12 @@ async function onSilence(ws, session) {
   session.audioChunks = []
   session.isPlaying = true
 
-  // Transcribe with Groq Whisper
   let transcript = ''
   try {
     const groq = new Groq({ apiKey: GROQ_API_KEY })
     const wavBuffer = mulawToWav(audioData)
     const audioFile = new File([wavBuffer], 'answer.wav', { type: 'audio/wav' })
-    const result = await groq.audio.transcriptions.create({
-      file: audioFile,
-      model: 'whisper-large-v3',
-      language: 'en',
-    })
+    const result = await groq.audio.transcriptions.create({ file: audioFile, model: 'whisper-large-v3', language: 'en' })
     transcript = result.text.trim()
     console.log(`[WS] Q${session.questionIndex} — "${transcript}"`)
   } catch (err) {
@@ -189,22 +177,26 @@ async function onSilence(ws, session) {
     transcript = 'unclear'
   }
 
-  // Store answer
   const q = QUESTIONS[session.questionIndex]
-  if (q) {
-    session.answers[q.field] = transcript || 'no_response'
-  }
+  if (q) session.answers[q.field] = transcript || 'no_response'
 
-  // Advance to next question or finish
   const nextIndex = session.questionIndex + 1
-
   if (nextIndex >= QUESTIONS.length) {
-    // All done — thank candidate, save answers, hang up
     const closing = `Thank you so much, ${session.firstName}! That is everything we needed. The team at ${session.agencyName} will review your details and be in touch within 2 business days. Have a wonderful day!`
     await speak(ws, closing)
-
-    // Save all answers to main platform
     await saveAnswers(session)
+    // Hang up via Plivo REST API
+    if (session.callUuid) {
+      try {
+        await fetch(`https://api.plivo.com/v1/Account/${PLIVO_AUTH_ID}/Call/${session.callUuid}/`, {
+          method: 'DELETE',
+          headers: { 'Authorization': PLIVO_AUTH_HEADER },
+        })
+        console.log(`[WS] Call hung up: ${session.callUuid}`)
+      } catch (err) {
+        console.error('[WS] Hangup error:', err.message)
+      }
+    }
     return
   }
 
@@ -222,7 +214,7 @@ async function speakAndListen(ws, session, text, nextQuestionIndex) {
 }
 
 async function speak(ws, text) {
-  if (ws.readyState !== 1) return  // ws.OPEN = 1
+  if (ws.readyState !== 1) return
   try {
     const elevenlabs = new ElevenLabsClient({ apiKey: ELEVENLABS_API_KEY })
     const audio = await elevenlabs.textToSpeech.convert(ELEVENLABS_VOICE_ID, {
@@ -230,15 +222,10 @@ async function speak(ws, text) {
       modelId: 'eleven_multilingual_v2',
       outputFormat: 'ulaw_8000',
     })
-    // Stream audio chunks to Plivo
     for await (const chunk of audio) {
       if (ws.readyState !== 1) break
-      ws.send(JSON.stringify({
-        event: 'media',
-        media: { payload: Buffer.from(chunk).toString('base64') },
-      }))
+      ws.send(JSON.stringify({ event: 'media', media: { payload: Buffer.from(chunk).toString('base64') } }))
     }
-    // Small pause so Plivo finishes playing before we start listening
     await new Promise(r => setTimeout(r, 400))
   } catch (err) {
     console.error('[WS] ElevenLabs error:', err.message)
@@ -248,31 +235,22 @@ async function speak(ws, text) {
 // ─── Save answers to main platform ───────────────────────────────────────────
 async function saveAnswers(session) {
   if (!MAIN_PLATFORM_URL || !session.candidateId) {
-    console.log('[WS] Skipping save — no platform URL or candidateId')
-    console.log('[WS] Answers:', session.answers)
+    console.log('[WS] Answers (no platform save):', session.answers)
     return
   }
   try {
-    const response = await fetch(`${MAIN_PLATFORM_URL}/api/voice/results`, {
+    const res = await fetch(`${MAIN_PLATFORM_URL}/api/voice/results`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        candidateId: session.candidateId,
-        secret: MAIN_PLATFORM_SECRET,
-        ...session.answers,
-      }),
+      body: JSON.stringify({ candidateId: session.candidateId, secret: MAIN_PLATFORM_SECRET, ...session.answers }),
     })
-    if (response.ok) {
-      console.log(`[WS] Answers saved for candidate ${session.candidateId}`)
-    } else {
-      console.error('[WS] Save failed:', response.status, await response.text())
-    }
+    console.log(`[WS] Answers saved: ${res.status}`)
   } catch (err) {
     console.error('[WS] Save error:', err.message)
   }
 }
 
-// ─── mulaw → WAV conversion (pure JS, no deps) ───────────────────────────────
+// ─── mulaw → WAV ─────────────────────────────────────────────────────────────
 function mulawToWav(mulawData) {
   const pcm = new Int16Array(mulawData.length)
   for (let i = 0; i < mulawData.length; i++) {
@@ -290,12 +268,12 @@ function mulawToWav(mulawData) {
   header.write('WAVE', 8)
   header.write('fmt ', 12)
   header.writeUInt32LE(16, 16)
-  header.writeUInt16LE(1, 20)      // PCM
-  header.writeUInt16LE(1, 22)      // mono
-  header.writeUInt32LE(8000, 24)   // 8kHz
-  header.writeUInt32LE(16000, 28)  // byte rate
-  header.writeUInt16LE(2, 32)      // block align
-  header.writeUInt16LE(16, 34)     // bits per sample
+  header.writeUInt16LE(1, 20)
+  header.writeUInt16LE(1, 22)
+  header.writeUInt32LE(8000, 24)
+  header.writeUInt32LE(16000, 28)
+  header.writeUInt16LE(2, 32)
+  header.writeUInt16LE(16, 34)
   header.write('data', 36)
   header.writeUInt32LE(pcmBuf.length, 40)
   return Buffer.concat([header, pcmBuf])
@@ -304,7 +282,7 @@ function mulawToWav(mulawData) {
 // ─── Start ────────────────────────────────────────────────────────────────────
 server.listen(PORT, () => {
   console.log(`[Voice Agent] Listening on port ${PORT}`)
-  console.log(`  /answer  → Plivo answer webhook`)
-  console.log(`  /hangup  → Plivo hangup webhook`)
-  console.log(`  /stream  → WebSocket (bidirectional audio)`)
+  console.log(`  /answer → Plivo answer webhook`)
+  console.log(`  /hangup → Plivo hangup webhook`)
+  console.log(`  /stream → WebSocket bidirectional audio`)
 })
