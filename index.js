@@ -121,13 +121,13 @@ wss.on('connection', (plivoWs) => {
       session.agencyName = info.agencyName || 'our team'
       console.log(`[WS] Call started: ${session.candidateName} | ${session.jobTitle}`)
 
-      // Connect Deepgram STT
-      session.dgSttWs = connectSTT(session)
-
-      // Greet candidate
+      // Greet candidate first, THEN open STT (avoid Deepgram timeout while TTS plays)
       const greeting = `Hi ${session.firstName}! This is a quick screening call from ${session.agencyName} regarding your application for the ${session.jobTitle} position. I have 4 short questions — takes under 2 minutes.`
       await speakToPlivo(session, greeting)
       await speakToPlivo(session, QUESTIONS[0].text)
+
+      // Now open STT — we're ready to listen
+      session.dgSttWs = connectSTT(session)
       session.isPlaying = false
     }
 
@@ -220,8 +220,8 @@ async function speakToPlivo(session, text) {
     for (let i = 0; i < mulaw.length; i += CHUNK) {
       if (session.plivoWs.readyState !== 1) break
       session.plivoWs.send(JSON.stringify({
-        event: 'media',
-        media: { payload: mulaw.slice(i, i + CHUNK).toString('base64') },
+        event: 'playAudio',
+        media: { contentType: 'audio/x-mulaw', sampleRate: 8000, payload: mulaw.slice(i, i + CHUNK).toString('base64') },
       }))
     }
 
