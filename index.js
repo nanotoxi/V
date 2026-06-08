@@ -15,12 +15,12 @@ const PLIVO_AUTH_HEADER = 'Basic ' + Buffer.from(`${PLIVO_AUTH_ID}:${PLIVO_AUTH_
 
 // ─── Questions ────────────────────────────────────────────────────────────────
 const QUESTIONS = [
-  { field: 'noticePeriod', text: 'What is your current notice period? You can just say the number of days.' },
-  { field: 'currentCtc', text: 'What is your current C T C — your annual salary in lakhs?' },
-  { field: 'expectedCtc', text: 'And what is your expected C T C — the salary you are targeting?' },
-  { field: 'activelyLooking', text: 'Last question. Are you actively looking for a new job right now, or just exploring options?' },
+  { field: 'noticePeriod', text: 'What is your current notice period?' },
+  { field: 'currentCtc', text: 'What is your current CTC — your annual salary in lakhs?' },
+  { field: 'expectedCtc', text: 'And what salary are you looking for in your next role?' },
+  { field: 'activelyLooking', text: 'Are you actively looking right now, or just exploring options?' },
 ]
-const ACKS = ['Got it.', 'Perfect, thank you.', 'Understood.', 'Great.']
+const ACKS = ['Got it.', 'Sure.', 'Noted.', 'Great.']
 
 // ─── Pending call info (answer URL → WS bridge) ───────────────────────────────
 const pendingCalls = new Map()
@@ -122,7 +122,7 @@ wss.on('connection', (plivoWs) => {
       console.log(`[WS] Call started: ${session.candidateName} | ${session.jobTitle}`)
 
       // Greet candidate first, THEN open STT (avoid Deepgram timeout while TTS plays)
-      const greeting = `Hi ${session.firstName}! This is a quick screening call from ${session.agencyName} regarding your application for the ${session.jobTitle} position. I have 4 short questions — takes under 2 minutes.`
+      const greeting = `Hi ${session.firstName}, this is a call from ${session.agencyName} about your application for ${session.jobTitle}. I just have 4 quick questions.`
       await speakToPlivo(session, greeting)
       await speakToPlivo(session, QUESTIONS[0].text)
 
@@ -150,7 +150,7 @@ wss.on('connection', (plivoWs) => {
 // ─── Deepgram STT ─────────────────────────────────────────────────────────────
 function connectSTT(session) {
   const ws = new WebSocket(
-    `wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=8000&endpointing=800&interim_results=false&smart_format=true`,
+    `wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=8000&endpointing=1500&utterance_end_ms=1500&interim_results=false&smart_format=true`,
     { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
   )
 
@@ -163,11 +163,18 @@ function connectSTT(session) {
     let event
     try { event = JSON.parse(raw.toString()) } catch { return }
 
-    if (event.type === 'Results' && event.speech_final) {
-      const transcript = event.channel?.alternatives?.[0]?.transcript?.trim() || ''
+    if ((event.type === 'Results' && event.speech_final) || event.type === 'UtteranceEnd') {
+      if (session.isPlaying) return
+      const transcript = event.channel?.alternatives?.[0]?.transcript?.trim() || session._lastTranscript || ''
       if (!transcript) return
+      session._lastTranscript = ''
       console.log(`[STT] Q${session.questionIndex}: "${transcript}"`)
       await handleAnswer(session, transcript)
+    }
+    if (event.type === 'Results' && !event.speech_final) {
+      // Buffer interim so UtteranceEnd can use it as fallback
+      const t = event.channel?.alternatives?.[0]?.transcript?.trim()
+      if (t) session._lastTranscript = t
     }
   })
 
@@ -200,7 +207,7 @@ async function speakToPlivo(session, text) {
   console.log(`[TTS] Speaking: "${text.slice(0, 60)}..."`)
   try {
     const res = await fetch(
-      `https://api.deepgram.com/v1/speak?model=aura-2-odysseus-en&encoding=linear16&sample_rate=8000&container=none`,
+      `https://api.deepgram.com/v1/speak?model=aura-2-asteria-en&encoding=linear16&sample_rate=8000&container=none`,
       {
         method: 'POST',
         headers: { Authorization: `Token ${DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' },
