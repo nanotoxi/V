@@ -1,5 +1,6 @@
 import http from 'http'
 import { WebSocketServer, WebSocket } from 'ws'
+import Groq from 'groq-sdk'
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001
@@ -12,63 +13,17 @@ const PLIVO_AUTH_TOKEN = process.env.PLIVO_AUTH_TOKEN || 'MDY5NGY3NTUtNTBiZC00ZD
 const AGENT_URL = process.env.AGENT_URL || `http://localhost:${PORT}`
 const PLIVO_AUTH_HEADER = 'Basic ' + Buffer.from(`${PLIVO_AUTH_ID}:${PLIVO_AUTH_TOKEN}`).toString('base64')
 
-// ─── Deepgram Voice Agent settings builder ────────────────────────────────────
-function buildSettings(firstName, jobTitle, agencyName) {
-  return {
-    type: 'Settings',
-    audio: {
-      input:  { encoding: 'linear16', sample_rate: 8000 },
-      output: { encoding: 'linear16', sample_rate: 8000, container: 'none' },
-    },
-    agent: {
-      listen: {
-        provider: { type: 'deepgram', model: 'nova-3' },
-      },
-      think: {
-        provider: {
-          type: 'open_ai',
-          model: 'llama-3.3-70b-versatile',
-          endpoint: { url: 'https://api.groq.com/openai/v1', headers: { Authorization: `Bearer ${GROQ_API_KEY}` } },
-        },
-        prompt: `You are a professional HR screening assistant calling on behalf of ${agencyName}.
-You are speaking with ${firstName} about their application for ${jobTitle}.
+// ─── Questions ────────────────────────────────────────────────────────────────
+const QUESTIONS = [
+  { field: 'noticePeriod', text: 'What is your current notice period? You can just say the number of days.' },
+  { field: 'currentCtc', text: 'What is your current C T C — your annual salary in lakhs?' },
+  { field: 'expectedCtc', text: 'And what is your expected C T C — the salary you are targeting?' },
+  { field: 'activelyLooking', text: 'Last question. Are you actively looking for a new job right now, or just exploring options?' },
+]
+const ACKS = ['Got it.', 'Perfect, thank you.', 'Understood.', 'Great.']
 
-Your job is to ask exactly these 4 questions in order, one at a time:
-1. What is your current notice period?
-2. What is your current CTC — your annual salary in lakhs?
-3. What is your expected CTC — the salary you are targeting?
-4. Are you actively looking for a new job, or just exploring options?
-
-Guidelines:
-- Be warm and conversational, not robotic.
-- Wait for the full answer before moving to the next question.
-- If the answer is unclear, ask once for clarification.
-- After collecting all 4 answers, call the save_answers function immediately.
-- Then say a warm goodbye and end the call.`,
-        functions: [
-          {
-            name: 'save_answers',
-            description: 'Save all 4 screening answers once collected. Call this only after you have answers for all 4 questions.',
-            parameters: {
-              type: 'object',
-              properties: {
-                noticePeriod:    { type: 'string', description: "Candidate's current notice period" },
-                currentCtc:      { type: 'string', description: "Candidate's current annual CTC in lakhs" },
-                expectedCtc:     { type: 'string', description: "Candidate's expected annual CTC in lakhs" },
-                activelyLooking: { type: 'string', description: "Whether actively looking or just exploring" },
-              },
-              required: ['noticePeriod', 'currentCtc', 'expectedCtc', 'activelyLooking'],
-            },
-          },
-        ],
-      },
-      speak: {
-        provider: { type: 'deepgram', model: 'aura-2-odysseus-en' },
-      },
-      greeting: `Hi ${firstName}! This is a quick screening call from ${agencyName} regarding your application for the ${jobTitle} position. I have just 4 short questions for you — it will take under 2 minutes. Shall we get started?`,
-    },
-  }
-}
+// ─── Pending call info (answer URL → WS bridge) ───────────────────────────────
+const pendingCalls = new Map()
 
 // ─── HTTP server ──────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
@@ -93,27 +48,24 @@ const server = http.createServer(async (req, res) => {
 
       console.log(`[HTTP] /answer — callUuid:${callUuid} candidate:${candidateName}`)
 
-      // Keep call alive while Deepgram Voice Agent handles conversation
+      // Store call info for when WS connects (Plivo doesn't pass customParams in start event)
+      pendingCalls.set(callUuid, { candidateId, candidateName, jobTitle, agencyName })
+      setTimeout(() => pendingCalls.delete(callUuid), 120000)
+
       res.writeHead(200, { 'Content-Type': 'application/xml' })
       res.end(`<?xml version="1.0" encoding="UTF-8"?><Response><Wait length="600" /></Response>`)
 
-      // Start bidirectional Plivo stream
       const wsUrl = AGENT_URL.replace('https://', 'wss://').replace('http://', 'ws://') + '/stream'
       try {
-        const streamRes = await fetch(`https://api.plivo.com/v1/Account/${PLIVO_AUTH_ID}/Call/${callUuid}/Stream/`, {
+        const r = await fetch(`https://api.plivo.com/v1/Account/${PLIVO_AUTH_ID}/Call/${callUuid}/Stream/`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': PLIVO_AUTH_HEADER },
-          body: JSON.stringify({
-            service_url: wsUrl,
-            bidirectional: true,
-            audio_track: 'inbound',
-            customParameters: { candidateId, candidateName, jobTitle, agencyName },
-          }),
+          headers: { 'Content-Type': 'application/json', Authorization: PLIVO_AUTH_HEADER },
+          body: JSON.stringify({ service_url: wsUrl, bidirectional: true, audio_track: 'inbound' }),
         })
-        const streamData = await streamRes.json()
-        console.log(`[HTTP] Stream result:`, JSON.stringify(streamData))
+        const d = await r.json()
+        console.log(`[HTTP] Stream:`, d.message || JSON.stringify(d))
       } catch (err) {
-        console.error('[HTTP] Stream start error:', err.message)
+        console.error('[HTTP] Stream error:', err.message)
       }
     })
     return
@@ -125,180 +77,211 @@ const server = http.createServer(async (req, res) => {
     req.on('end', () => {
       try {
         const p = Object.fromEntries(new URLSearchParams(body))
-        console.log(`[HTTP] /hangup — uuid:${p.CallUUID} duration:${p.Duration}s cause:${p.HangupCause}`)
+        console.log(`[HTTP] /hangup — ${p.CallUUID} ${p.Duration}s ${p.HangupCause}`)
       } catch {}
-      res.writeHead(200)
-      res.end()
+      res.writeHead(200); res.end()
     })
     return
   }
 
-  res.writeHead(404)
-  res.end()
+  res.writeHead(404); res.end()
 })
 
-// ─── Plivo WebSocket server ───────────────────────────────────────────────────
+// ─── WebSocket server ─────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ server, path: '/stream' })
 
 wss.on('connection', (plivoWs) => {
-  const peerId = Math.random().toString(36).slice(2)
-  console.log(`[WS] Plivo connected: ${peerId}`)
-
-  let deepgramWs = null
-  let callUuid = ''
-  let candidateId = ''
-  let candidateName = ''
-  let jobTitle = ''
-  let agencyName = ''
+  console.log('[WS] Plivo connected')
+  const session = {
+    plivoWs,
+    callUuid: '',
+    candidateId: '',
+    candidateName: 'there',
+    firstName: 'there',
+    jobTitle: 'this role',
+    agencyName: 'our team',
+    questionIndex: 0,
+    answers: {},
+    isPlaying: true,
+    dgSttWs: null,
+    transcript: '',
+  }
 
   plivoWs.on('message', async (raw) => {
     let data
     try { data = JSON.parse(raw.toString()) } catch { return }
 
     if (data.event === 'start') {
-      console.log(`[WS] start payload:`, JSON.stringify(data.start))
-      const params = data.start?.customParameters || data.start?.custom_parameters || {}
-      callUuid = data.start?.callId || data.start?.callUuid || data.start?.call_id || ''
-      candidateId = params.candidateId || params.candidate_id || ''
-      candidateName = decodeURIComponent(params.candidateName || params.candidate_name || 'there')
-      jobTitle = decodeURIComponent(params.jobTitle || 'this role')
-      agencyName = decodeURIComponent(params.agencyName || 'our team')
-      const firstName = candidateName.split(' ')[0]
+      session.callUuid = data.start?.callId || ''
+      const info = pendingCalls.get(session.callUuid) || {}
+      session.candidateId = info.candidateId || ''
+      session.candidateName = info.candidateName || 'there'
+      session.firstName = session.candidateName.split(' ')[0]
+      session.jobTitle = info.jobTitle || 'this role'
+      session.agencyName = info.agencyName || 'our team'
+      console.log(`[WS] Call started: ${session.candidateName} | ${session.jobTitle}`)
 
-      console.log(`[WS] Session: ${candidateName} | job:${jobTitle} | callUuid:${callUuid}`)
+      // Connect Deepgram STT
+      session.dgSttWs = connectSTT(session)
 
-      // Connect to Deepgram Voice Agent
-      deepgramWs = new WebSocket(`wss://api.deepgram.com/v1/agent`, {
-        headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
-      })
-
-      deepgramWs.on('open', () => {
-        console.log(`[DG] Connected to Deepgram Voice Agent`)
-        deepgramWs.send(JSON.stringify(buildSettings(firstName, jobTitle, agencyName)))
-      })
-
-      deepgramWs.on('message', (dgRaw) => {
-        if (Buffer.isBuffer(dgRaw) || dgRaw instanceof Uint8Array) {
-          // Audio from Deepgram (linear16 8kHz) → convert to mulaw → send to Plivo
-          const buf = Buffer.isBuffer(dgRaw) ? dgRaw : Buffer.from(dgRaw)
-          if (buf.length === 0) return
-          const mulaw = linear16ToMulaw(buf)
-          if (plivoWs.readyState === 1) {
-            plivoWs.send(JSON.stringify({ event: 'media', media: { payload: mulaw.toString('base64') } }))
-          }
-        } else {
-          // JSON event from Deepgram
-          let event
-          try { event = JSON.parse(dgRaw.toString()) } catch { return }
-
-          console.log(`[DG] Event: ${event.type}`)
-
-          if (event.type === 'FunctionCallRequest') {
-            const fn = event.function_name || event.function_call?.name
-            const args = event.input || event.function_call?.arguments || {}
-            const callId = event.function_call_id || event.id
-
-            console.log(`[DG] Function call: ${fn}`, args)
-
-            if (fn === 'save_answers') {
-              // Save answers to main platform
-              saveAnswers(candidateId, args).catch(err => console.error('[DG] Save error:', err.message))
-
-              // Send function result back to Deepgram
-              deepgramWs.send(JSON.stringify({
-                type: 'FunctionCallResponse',
-                function_call_id: callId,
-                output: 'Answers saved successfully.',
-              }))
-            }
-          }
-
-          if (event.type === 'AgentAudioDone' || event.type === 'ConversationText') {
-            // After farewell, hang up
-            if (event.type === 'ConversationText' && event.role === 'assistant') {
-              const text = (event.content || '').toLowerCase()
-              if (text.includes('goodbye') || text.includes('take care') || text.includes('have a great day') || text.includes('wonderful day')) {
-                setTimeout(() => hangUpCall(callUuid), 3000)
-              }
-            }
-          }
-        }
-      })
-
-      deepgramWs.on('error', (err) => console.error(`[DG] Error:`, err.message))
-      deepgramWs.on('close', () => console.log(`[DG] Disconnected`))
+      // Greet candidate
+      const greeting = `Hi ${session.firstName}! This is a quick screening call from ${session.agencyName} regarding your application for the ${session.jobTitle} position. I have 4 short questions — takes under 2 minutes.`
+      await speakToPlivo(session, greeting)
+      await speakToPlivo(session, QUESTIONS[0].text)
+      session.isPlaying = false
     }
 
-    if (data.event === 'media' && deepgramWs?.readyState === 1) {
-      // Audio from Plivo (linear16 8kHz) → forward as binary to Deepgram
-      deepgramWs.send(Buffer.from(data.media.payload, 'base64'))
+    if (data.event === 'media' && session.dgSttWs?.readyState === 1 && !session.isPlaying) {
+      session.dgSttWs.send(Buffer.from(data.media.payload, 'base64'))
     }
 
     if (data.event === 'stop') {
-      deepgramWs?.close()
+      session.dgSttWs?.close()
     }
   })
 
   plivoWs.on('close', () => {
-    console.log(`[WS] Plivo disconnected: ${peerId}`)
-    deepgramWs?.close()
+    console.log('[WS] Plivo disconnected')
+    session.dgSttWs?.close()
   })
-  plivoWs.on('error', (err) => console.error(`[WS] Plivo error:`, err.message))
+  plivoWs.on('error', err => console.error('[WS] Plivo error:', err.message))
 })
+
+// ─── Deepgram STT ─────────────────────────────────────────────────────────────
+function connectSTT(session) {
+  const ws = new WebSocket(
+    `wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=8000&endpointing=800&interim_results=false&smart_format=true`,
+    { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
+  )
+
+  ws.on('open', () => console.log('[STT] Connected'))
+  ws.on('error', err => console.error('[STT] Error:', err.message))
+  ws.on('close', () => console.log('[STT] Closed'))
+
+  ws.on('message', async (raw) => {
+    if (session.isPlaying) return
+    let event
+    try { event = JSON.parse(raw.toString()) } catch { return }
+
+    if (event.type === 'Results' && event.speech_final) {
+      const transcript = event.channel?.alternatives?.[0]?.transcript?.trim() || ''
+      if (!transcript) return
+      console.log(`[STT] Q${session.questionIndex}: "${transcript}"`)
+      await handleAnswer(session, transcript)
+    }
+  })
+
+  return ws
+}
+
+// ─── Conversation logic ───────────────────────────────────────────────────────
+async function handleAnswer(session, transcript) {
+  session.isPlaying = true
+
+  const q = QUESTIONS[session.questionIndex]
+  if (q) session.answers[q.field] = transcript
+
+  session.questionIndex++
+
+  if (session.questionIndex >= QUESTIONS.length) {
+    await speakToPlivo(session, `Thank you so much, ${session.firstName}! That is everything we needed. The team at ${session.agencyName} will be in touch within 2 business days. Have a wonderful day!`)
+    await saveAnswers(session)
+    setTimeout(() => hangUpCall(session.callUuid), 2000)
+    return
+  }
+
+  const ack = ACKS[(session.questionIndex - 1) % ACKS.length]
+  await speakToPlivo(session, `${ack} ${QUESTIONS[session.questionIndex].text}`)
+  session.isPlaying = false
+}
+
+// ─── Deepgram TTS ─────────────────────────────────────────────────────────────
+async function speakToPlivo(session, text) {
+  console.log(`[TTS] Speaking: "${text.slice(0, 60)}..."`)
+  try {
+    const res = await fetch(
+      `https://api.deepgram.com/v1/speak?model=aura-2-odysseus-en&encoding=linear16&sample_rate=8000&container=none`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Token ${DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      }
+    )
+    if (!res.ok) {
+      const err = await res.text()
+      console.error('[TTS] Error:', err)
+      return
+    }
+    const audioBuffer = Buffer.from(await res.arrayBuffer())
+    const mulaw = linear16ToMulaw(audioBuffer)
+
+    // Send in 20ms chunks (160 bytes at 8kHz mulaw)
+    const CHUNK = 160
+    for (let i = 0; i < mulaw.length; i += CHUNK) {
+      if (session.plivoWs.readyState !== 1) break
+      session.plivoWs.send(JSON.stringify({
+        event: 'media',
+        media: { payload: mulaw.slice(i, i + CHUNK).toString('base64') },
+      }))
+    }
+
+    // Wait for audio to finish playing (length / 8000 samples/sec * 1000ms + buffer)
+    await new Promise(r => setTimeout(r, Math.ceil((mulaw.length / 8000) * 1000) + 300))
+  } catch (err) {
+    console.error('[TTS] Fetch error:', err.message)
+  }
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 async function hangUpCall(callUuid) {
   if (!callUuid) return
   try {
     await fetch(`https://api.plivo.com/v1/Account/${PLIVO_AUTH_ID}/Call/${callUuid}/`, {
-      method: 'DELETE',
-      headers: { Authorization: PLIVO_AUTH_HEADER },
+      method: 'DELETE', headers: { Authorization: PLIVO_AUTH_HEADER },
     })
-    console.log(`[WS] Call hung up: ${callUuid}`)
+    console.log(`[HTTP] Call hung up: ${callUuid}`)
   } catch (err) {
-    console.error('[WS] Hangup error:', err.message)
+    console.error('[HTTP] Hangup error:', err.message)
   }
 }
 
-async function saveAnswers(candidateId, answers) {
-  if (!MAIN_PLATFORM_URL || !candidateId) {
-    console.log('[WS] Answers (no platform save):', answers)
-    return
+async function saveAnswers(session) {
+  console.log('[WS] Answers:', session.answers)
+  if (!MAIN_PLATFORM_URL || !session.candidateId) return
+  try {
+    const res = await fetch(`${MAIN_PLATFORM_URL}/api/voice/results`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ candidateId: session.candidateId, secret: MAIN_PLATFORM_SECRET, ...session.answers }),
+    })
+    console.log(`[WS] Answers saved: ${res.status}`)
+  } catch (err) {
+    console.error('[WS] Save error:', err.message)
   }
-  const res = await fetch(`${MAIN_PLATFORM_URL}/api/voice/results`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ candidateId, secret: MAIN_PLATFORM_SECRET, ...answers }),
-  })
-  console.log(`[WS] Answers saved: ${res.status}`)
 }
 
-// ─── Audio conversion: linear16 8kHz → mulaw 8kHz ────────────────────────────
+// ─── linear16 → mulaw ─────────────────────────────────────────────────────────
 function linear16ToMulaw(buf) {
-  const samples = buf.length / 2
+  const samples = Math.floor(buf.length / 2)
   const out = Buffer.alloc(samples)
   for (let i = 0; i < samples; i++) {
-    const sample = buf.readInt16LE(i * 2)
-    out[i] = encodeMulaw(sample)
+    out[i] = encodeMulaw(buf.readInt16LE(i * 2))
   }
   return out
 }
 
-function encodeMulaw(sample) {
-  const BIAS = 0x84
-  const CLIP = 32635
+function encodeMulaw(s) {
+  const BIAS = 0x84, CLIP = 32635
   let sign = 0
-  if (sample < 0) { sign = 0x80; sample = -sample }
-  if (sample > CLIP) sample = CLIP
-  sample += BIAS
+  if (s < 0) { sign = 0x80; s = -s }
+  if (s > CLIP) s = CLIP
+  s += BIAS
   let exp = 7
-  for (let mask = 0x4000; (sample & mask) === 0 && exp > 0; exp--, mask >>= 1) {}
-  const mantissa = (sample >> (exp + 3)) & 0x0F
-  return (~(sign | (exp << 4) | mantissa)) & 0xFF
+  for (let m = 0x4000; (s & m) === 0 && exp > 0; exp--, m >>= 1) {}
+  return (~(sign | (exp << 4) | ((s >> (exp + 3)) & 0x0F))) & 0xFF
 }
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 server.listen(PORT, () => {
   console.log(`[Voice Agent] Listening on port ${PORT}`)
-  console.log(`  Deepgram Voice Agent bridge ready`)
 })
