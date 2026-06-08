@@ -12,8 +12,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@elevenlabs/elevenlabs-js": "^2.51.0",
-    "groq-sdk": "^0.21.0",
-    "ws": "^8.18.0"
+    "groq-sdk": "^0.21.0"
   }
 }
