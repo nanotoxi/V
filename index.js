@@ -150,7 +150,7 @@ wss.on('connection', (plivoWs) => {
 // ─── Deepgram STT ─────────────────────────────────────────────────────────────
 function connectSTT(session) {
   const ws = new WebSocket(
-    `wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=8000&endpointing=1500&utterance_end_ms=1500&interim_results=false&smart_format=true`,
+    `wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=8000&endpointing=1500&interim_results=true&smart_format=true`,
     { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
   )
 
