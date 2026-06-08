@@ -127,6 +127,33 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // ── /call — trigger a test outbound call ─────────────────────────────────────
+  if (req.method === 'POST' && url.pathname === '/call') {
+    let body = {}
+    try { body = await parseBody(req) } catch (_) {}
+    const to            = body.to || ''
+    const candidateId   = body.candidateId || '0'
+    const candidateName = body.candidateName || 'Candidate'
+    const jobTitle      = body.jobTitle || 'this role'
+    const agencyName    = body.agencyName || 'Zynq AI'
+
+    if (!to) { res.writeHead(400); res.end('missing to'); return }
+
+    const answerUrl = `${AGENT_URL}/answer?candidateId=${candidateId}&candidateName=${encodeURIComponent(candidateName)}&jobTitle=${encodeURIComponent(jobTitle)}&agencyName=${encodeURIComponent(agencyName)}`
+    const hangupUrl = `${AGENT_URL}/hangup`
+    const creds = Buffer.from(`${PLIVO_AUTH_ID}:${PLIVO_AUTH_TOKEN}`).toString('base64')
+
+    const plivoRes = await fetch(`https://api.plivo.com/v1/Account/${PLIVO_AUTH_ID}/Call/`, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: process.env.PLIVO_NUMBER, to, answer_url: answerUrl, answer_method: 'POST', hangup_url: hangupUrl, hangup_method: 'POST' })
+    })
+    const data = await plivoRes.json()
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(data))
+    return
+  }
+
   // ── /hangup ──────────────────────────────────────────────────────────────────
   if (req.method === 'POST' && url.pathname === '/hangup') {
     const body = await parseBody(req)
