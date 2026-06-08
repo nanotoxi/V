@@ -17,7 +17,7 @@ function buildSettings(firstName, jobTitle, agencyName) {
   return {
     type: 'Settings',
     audio: {
-      input:  { encoding: 'mulaw', sample_rate: 8000 },
+      input:  { encoding: 'linear16', sample_rate: 8000 },
       output: { encoding: 'linear16', sample_rate: 8000, container: 'none' },
     },
     agent: {
@@ -167,8 +167,10 @@ wss.on('connection', (plivoWs) => {
 
       console.log(`[WS] Session: ${candidateName} | job:${jobTitle} | callUuid:${callUuid}`)
 
-      // Connect to Deepgram Voice Agent (key as query param — more reliable than header in Node ws)
-      deepgramWs = new WebSocket(`wss://agent.deepgram.com/agent?apikey=${DEEPGRAM_API_KEY}`)
+      // Connect to Deepgram Voice Agent
+      deepgramWs = new WebSocket(`wss://api.deepgram.com/v1/agent`, {
+        headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
+      })
 
       deepgramWs.on('open', () => {
         console.log(`[DG] Connected to Deepgram Voice Agent`)
@@ -228,9 +230,8 @@ wss.on('connection', (plivoWs) => {
     }
 
     if (data.event === 'media' && deepgramWs?.readyState === 1) {
-      // Audio from Plivo (mulaw 8kHz) → send as binary to Deepgram
-      const mulawBuf = Buffer.from(data.media.payload, 'base64')
-      deepgramWs.send(mulawBuf)
+      // Audio from Plivo (linear16 8kHz) → forward as binary to Deepgram
+      deepgramWs.send(Buffer.from(data.media.payload, 'base64'))
     }
 
     if (data.event === 'stop') {
