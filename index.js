@@ -156,20 +156,19 @@ wss.on('connection', (plivoWs) => {
     try { data = JSON.parse(raw.toString()) } catch { return }
 
     if (data.event === 'start') {
-      const params = data.start?.customParameters || {}
-      callUuid = data.start?.callId || data.start?.callUuid || ''
-      candidateId = params.candidateId || ''
-      candidateName = decodeURIComponent(params.candidateName || 'there')
+      console.log(`[WS] start payload:`, JSON.stringify(data.start))
+      const params = data.start?.customParameters || data.start?.custom_parameters || {}
+      callUuid = data.start?.callId || data.start?.callUuid || data.start?.call_id || ''
+      candidateId = params.candidateId || params.candidate_id || ''
+      candidateName = decodeURIComponent(params.candidateName || params.candidate_name || 'there')
       jobTitle = decodeURIComponent(params.jobTitle || 'this role')
       agencyName = decodeURIComponent(params.agencyName || 'our team')
       const firstName = candidateName.split(' ')[0]
 
       console.log(`[WS] Session: ${candidateName} | job:${jobTitle} | callUuid:${callUuid}`)
 
-      // Connect to Deepgram Voice Agent
-      deepgramWs = new WebSocket('wss://agent.deepgram.com/agent', {
-        headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
-      })
+      // Connect to Deepgram Voice Agent (key as query param — more reliable than header in Node ws)
+      deepgramWs = new WebSocket(`wss://agent.deepgram.com/agent?apikey=${DEEPGRAM_API_KEY}`)
 
       deepgramWs.on('open', () => {
         console.log(`[DG] Connected to Deepgram Voice Agent`)
