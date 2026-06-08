@@ -1,0 +1,19 @@
+{
+  "name": "zynq-voice-agent",
+  "version": "1.0.0",
+  "description": "Zynq AI voice screening agent — standalone Railway service",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@elevenlabs/elevenlabs-js": "^2.51.0",
+    "groq-sdk": "^0.21.0",
+    "ws": "^8.18.0"
+  }
+}
