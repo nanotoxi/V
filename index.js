@@ -36,7 +36,7 @@ function speak(text) {
 }
 
 function record(actionUrl) {
-  return `<Record action="${actionUrl.replace(/&/g, '&amp;')}" method="POST" maxLength="25" timeout="1" playBeep="false" />`
+  return `<Record action="${actionUrl.replace(/&/g, '&amp;')}" method="POST" maxLength="30" timeout="3" playBeep="false" />`
 }
 
 // ─── HTTP server ──────────────────────────────────────────────────────────────
@@ -70,7 +70,8 @@ const server = http.createServer(async (req, res) => {
 
   // ── /transcribe — called after each recording ────────────────────────────────
   if (req.method === 'POST' && url.pathname === '/transcribe') {
-    const body          = await parseBody(req)
+    let body = {}
+    try { body = await parseBody(req) } catch (_) {}
     const candidateId   = url.searchParams.get('candidateId') || ''
     const questionIndex = parseInt(url.searchParams.get('questionIndex') || '0')
     const candidateName = decodeURIComponent(url.searchParams.get('candidateName') || 'there')
