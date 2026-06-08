@@ -64,9 +64,9 @@ const server = http.createServer(async (req, res) => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': PLIVO_AUTH_HEADER },
           body: JSON.stringify({
-            serviceUrl: wsUrl,
+            service_url: wsUrl,
             bidirectional: true,
-            audioTrack: 'inbound',
+            audio_track: 'inbound',
             customParameters: { candidateId, candidateName, jobTitle, agencyName },
           }),
         })
