@@ -36,7 +36,7 @@ function speak(text) {
 }
 
 function record(actionUrl) {
-  return `<Record action="${actionUrl}" method="POST" maxLength="25" silence="1" playBeep="false" finishOnKey="#" />`
+  return `<Record action="${actionUrl.replace(/&/g, '&amp;')}" method="POST" maxLength="25" timeout="1" playBeep="false" />`
 }
 
 // ─── HTTP server ──────────────────────────────────────────────────────────────
